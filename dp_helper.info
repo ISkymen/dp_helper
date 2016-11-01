@@ -1,0 +1,9 @@
+name = DonPress Helper
+description = DonPress site helper
+
+core = 7.x
+
+files[] = dp_helper.module
+files[] = dp_helper.admin.inc
+
+configure = admin/config/workflow/dp_helper

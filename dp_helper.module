@@ -1,0 +1,350 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+
+function dp_helper_menu() {
+ 
+  $items = array();
+    $items['stat_page'] = array(
+      'title' => 'Статистика',
+      'page callback' => '_dp_helper_stat_page',
+      'access arguments' => array('access dp_helper content'),
+      //'access callback' => TRUE,
+    );
+
+    $items['admin/config/workflow/dp_helper'] = array(
+      'title' => 'Donpress Helper',
+      'description' => 'Administer Donpress Helper settings',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('dp_helper_settings'),
+      'access arguments' => array('access dp_helper settings'),
+      'file' => 'dp_helper.admin.inc',
+      'type' => MENU_NORMAL_ITEM,
+    );
+
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function dp_helper_permission() {
+  return array(
+    'access dp_helper content' => array(
+      'title' => t('Access content for the Donpress Helper module'),
+    ),
+    'access dp_helper settings' => array(
+      'title' => t('Access settings for the Donpress Helper module'),
+    )
+  );
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function dp_helper_form_alter(&$form, $form_state, $form_id) {
+  if (preg_match('/node_form$/', $form_id)) {
+    //dpm($form_id);
+    $form['#after_build'][] = 'dp_helper_after_build';
+  }
+}
+
+/**
+ * Custom after build form.
+ */
+function dp_helper_after_build($form, &$form_state) {
+  $path = drupal_get_path('module', 'dp_helper');
+  drupal_add_js ("$path/js/dp_helper.js");
+  drupal_add_css ("$path/css/dp_helper.css");
+  //dpm($path);
+  return $form;
+}
+
+/**
+ * Page callback mapped to the url /stat_page.
+ */
+function _dp_helper_stat_page() {
+  return array(
+    '#markup' => _dp_helper_date()
+  );
+}
+
+/**
+ * Calculations.
+ */
+function _dp_helper_date(){
+  $time_start = microtime(true);
+
+  $output = '';
+
+  $date_start = strtotime(variable_get("dp_helper_date_start"));
+  $date_end = strtotime(variable_get("dp_helper_date_end"));
+  $date_update = variable_get("dp_helper_last_update");
+
+  // Захочешь посмотреть за прошлый месяц - раскомменть строки ниже. Верхние строки можно не комментить. :)
+  //$date_start = strtotime('first day of previous month 00:00:00');
+  //$date_end = strtotime('first day of this month 00:00:00');
+
+  $dates = array($date_start, $date_end);
+
+  // Comment 24.11.2015 by Calipso
+  /*
+  $json_url = "https://api.privatbank.ua/p24api/pubinfo?exchange&json&coursid=11";
+  $request = drupal_http_request($json_url);
+  $json = drupal_json_decode($request->data);
+
+  
+
+  $er_eur = $json[1]['buy']; //variable_get("dp_helper_er_eur");    //exchange rate euro
+  $er_rub = $json[2]['buy']; //variable_get("dp_helper_er_rub");    //exchange rate ruble
+  */
+ 
+  $exchange_rate = array();
+
+  $json = file_get_contents('https://api.privatbank.ua/p24api/pubinfo?exchange&json&coursid=11');
+  $result = json_decode($json, true);
+
+  foreach($result as $item) {
+    $exchange_rate[$item['ccy']]['buy'] = $item['buy'];
+    $exchange_rate[$item['ccy']]['sale'] = $item['sale'];
+  }
+
+  $er_eur = $exchange_rate['EUR']['buy']; //exchange rate euro
+  $er_rub = $exchange_rate['RUR']['buy']; //exchange rate ruble
+
+  $rew_yandex_rub = variable_get("dp_helper_reward_yandex");     //reward Yandex ruble
+  $rew_google_eur = _dp_helper_test($date_start, $date_end); // variable_get("dp_helper_reward_google");    //reward Google euro
+  $rew_links_rub = variable_get("dp_helper_reward_links_1");    //reward Links ruble (for month)
+  $rew_links_rub_day = $rew_links_rub / date("t", $date_start) * date("j");
+
+  $reward = $rew_google_eur * $er_eur + ($rew_links_rub_day + $rew_yandex_rub) * $er_rub;
+
+  $editor_reward = variable_get("dp_helper_coeff_1");
+  $news_views = variable_get("dp_helper_coeff_2");
+
+  $days = ($date_end-$date_start)/86400+1;
+  $budget = $reward * $editor_reward ;
+  $budget_news = $budget * $news_views;
+  $budget_views = $budget * (1- $news_views);
+  $users = array();
+
+  /**
+   * Query the number of articles.
+   *
+   */
+  $query = db_select('node');
+  $query->addExpression('COUNT(node.nid)');
+  $query->fields('node', array('uid'));
+  $query->condition('node.created', $dates, 'BETWEEN');
+  $query->groupBy('node.uid');
+
+  $result = $query->execute()->fetchAllKeyed();
+
+  $total_news = array_sum($result);
+  $pay_per_node = (($total_news === 0) ? '0' : $budget_news/$total_news);
+
+  foreach ($result as $key=>$value) {
+    $users[$key]['uid'] = $key;
+    $users[$key]['nodes'] = $value;
+    $users[$key]['pay_per_nodes'] = (float)$value*(float)$pay_per_node;
+    $users[$key]['pay_total'] = $users[$key]['pay_per_nodes'];
+  }
+
+  foreach ($users as $key => $value) {
+    $username = user_load($key);
+    $users[$key]['user_name'] = $username->name;
+  }
+
+  /**
+   * Query the number of views.
+   *
+   */
+  $query1 = "SELECT node.uid, COUNT(nodeviewcount.nid) AS count FROM `nodeviewcount`, `node` WHERE node.nid = nodeviewcount.nid AND nodeviewcount. TIMESTAMP BETWEEN $date_start AND $date_end AND node.created BETWEEN $date_start AND $date_end GROUP BY node.uid";
+
+  $result2 = db_query($query1)->fetchAllKeyed();
+
+  $total_views = array_sum($result2);
+  $pay_per_view = (($total_views === 0) ? '0' : $budget_views/$total_views*1000);
+
+  foreach ($result2 as $key=>$value){
+    $users[$key]['views'] = $value;
+    $users[$key]['pay_per_view'] = (float)$value*(float)$pay_per_view/1000;
+    $users[$key]['pay_total'] += $users[$key]['pay_per_view'];
+  }
+
+  $output .= '<p>' . '<strong>Общий бюджет редакторов:</strong> ' . round($budget, 2) . ' грн.</p>';
+  $output .= '<p>' . '<strong>Материалов за период, всего:</strong> ' . $total_news . '</p>';
+  $output .= '<p>' . '<strong>Просмотров за период, всего:</strong> ' . $total_views . '</p>';
+  $output .= '<p>' . '<strong>Стоимость за 1 материал:</strong> ' . round($pay_per_node, 2)  . ' грн.</p>';
+  $output .= '<p>' . '<strong>Стоимость за 1000 просмотров:</strong> ' . round($pay_per_view, 2)  . ' грн.</p>';
+
+  foreach ($users as $user) {
+    $output .= '<hr />';
+    $output .= '<p><strong>Пользователь: '. $user['user_name'] . ' (uid ' . $user['uid'] .')</strong></p>';
+    $output .= '<p>Среднее количество просмотров одного материала: '. round($user['views']/$user['nodes']) . '</p>';
+    $output .= '<p>Среднее количество материалов в день: '. round($user['nodes']/$days) . '</p>';
+    $output .= '<ul>';
+    $output .= '<li>Материалов: '. $user['nodes'] . '</li>';
+    $output .= '<li>Просмотров: '. $user['views'] . '</li>';
+    $output .= '<li>Заработано за материалы: '. round($user['pay_per_nodes'], 2) . ' грн.</li>';
+    $output .= '<li>Заработано за просмотры: '. round($user['pay_per_view'], 2) . ' грн.</li>';
+    $output .= '<li>Заработано всего: '. round($user['pay_total'], 2) . ' грн.</li>';
+    $output .= '</ul>';
+    //$output .= '<hr />';
+  }
+
+  $time_end = microtime(true);
+  $execution_time = ($time_end - $time_start);
+  $output .= '<hr /><p><small>Статистика показывает примерный порядок сумм и цифр и может меняться в зависимости от времени, посещаемости сайта, курса валют и т.д.</small></p>';
+  $output .= '<p><small>Актуальность финансовых данных на: '. date("H:i, d.m.Y", $date_update) . '</small></p>';
+
+  // $output .= '<p><small>Сгенерировано: '. date(DATE_RSS) . '</small></p>';
+  drupal_set_title("Статистика за " . date("Y.m.d H:i:s", $date_start) . ' — ' . date("Y.m.d H:i:s", $date_end));
+
+
+  global $user;
+
+if (in_array('administrator', $user->roles) || in_array('owner', $user->roles)) :
+  $output .= '<hr />';
+  $output .= '<p><small>Общий доход: ' . round($reward, 2) . ' грн. (Adsense - ' . $rew_google_eur . ' евро, РСЯ - ' . $rew_yandex_rub . ' руб., Ссылки - ' . round($rew_links_rub_day, 2) . ' руб.)</small></p>';
+  $output .= '<p><small>Доход на одного владельца: ' . round(($reward-$budget)/3, 2) . ' грн.</small></p>';
+  $output .= '<p><small>Курсы валют: Евро - ' . $er_eur . ', Рубль - ' . $er_rub . '</small></p>';
+  $output .= '<p><small>Выполнено за время (грубо): ' . $execution_time . ' сек.</small></p>';
+endif;
+
+
+  return $output;
+}
+
+/* Holy shit */
+function _dp_helper_test($date_start, $date_end) {
+  $client_id = '308406826408-958qpkr7bmpq3t9hm735pd15l62htiv8.apps.googleusercontent.com';
+//  $client_secret = 'EF92IQWnAvZn2MUE50mnW6cf';
+  $client_secret = 'cE1xfcSkaK1PmxtpdY0uWJ16';
+  $redirect_uri = 'http://donpress.com/stat_page';
+  $output = '';
+
+  require_once 'Google/autoload.php';
+
+  require_once 'Google/Client.php';
+  require_once 'Google/Service/AdSense.php';
+
+  // Configure token storage on disk.
+  // If you want to store refresh tokens in a local disk file, set this to true.
+  define('STORE_ON_DISK', true, true);
+  define('TOKEN_FILENAME', 'tokens.dat', true);
+
+  // Set up authentication.
+  $client = new Google_Client();
+  $client->setClientId($client_id);
+  $client->setClientSecret($client_secret);
+  $client->setRedirectUri($redirect_uri);
+  $client->addScope('https://www.googleapis.com/auth/adsense.readonly');
+  $client->setAccessType('offline');
+
+  // Create service.
+  $service = new Google_Service_AdSense($client);
+
+  // If we're logging out we just need to clear our local access token.
+  // Note that this only logs you out of the session. If STORE_ON_DISK is
+  // enabled and you want to remove stored data, delete the file.
+  if (isset($_REQUEST['logout'])) {
+    unset($_SESSION['access_token']);
+  }
+
+  // If we have a code back from the OAuth 2.0 flow, we need to exchange that
+  // with the authenticate() function. We store the resultant access token
+  // bundle in the session (and disk, if enabled), and redirect to this page.
+  if (isset($_GET['code'])) {
+    $client->authenticate($_GET['code']);
+    // Note that "getAccessToken" actually retrieves both the access and refresh
+    // tokens, assuming both are available.
+    $_SESSION['access_token'] = $client->getAccessToken();
+    if (STORE_ON_DISK) {
+      file_put_contents(TOKEN_FILENAME, $_SESSION['access_token']);
+    }
+    $redirect = 'http://' . $_SERVER['HTTP_HOST'] . $_SERVER['PHP_SELF'];
+    header('Location: ' . filter_var($redirect, FILTER_SANITIZE_URL));
+    exit;
+  }
+
+  // If we have an access token, we can make requests, else we generate an
+  // authentication URL.
+  if (isset($_SESSION['access_token']) && $_SESSION['access_token']) {
+    $client->setAccessToken($_SESSION['access_token']);
+  } else if (STORE_ON_DISK && file_exists(TOKEN_FILENAME) &&
+        filesize(TOKEN_FILENAME) > 0) {
+    // Note that "setAccessToken" actually sets both the access and refresh token,
+    // assuming both were saved.
+    $client->setAccessToken(file_get_contents(TOKEN_FILENAME));
+    $_SESSION['access_token'] = $client->getAccessToken();
+  } else {
+    // If we're doing disk storage, generate a URL that forces user approval.
+    // This is the only way to guarantee we get back a refresh token.
+    if (STORE_ON_DISK) {
+      $client->setApprovalPrompt('force');
+    }
+    $authUrl = $client->createAuthUrl();
+  }
+
+  if (isset($authUrl)) {
+    $output .= '<a class="login" href="' . $authUrl . '">Connect Me!</a>';
+  } else {
+    //echo '<a class="logout" href="?logout">Logout</a>';
+    echo '';
+  };
+
+  if ($client->getAccessToken()) {
+
+      $startDate = date("Y-m-d", $date_start); //'startOfMonth';
+      $endDate = date("Y-m-d", $date_end);
+      $optParams = array(
+        'metric' => array(
+          'EARNINGS'),
+        'useTimezoneReporting' => TRUE,
+        'filter' => array(
+          'URL_CHANNEL_NAME==' . "donpress.com"
+        )
+      );
+
+    $results = $service->accounts_reports->generate("pub-4318230466334591", $startDate, $endDate, $optParams);
+    foreach ($results->rows as $result) {
+      $output .= $result[0];
+    }
+
+    $_SESSION['access_token'] = $client->getAccessToken();
+  }
+
+  return $output;
+
+}
+/* End of Holy shit*/
+
+function dp_helper_views_query_alter(&$view, &$query) {
+  //$query->add_groupby('node_created'); 
+  //$query->distinct = TRUE;
+  //dpm($query);
+}
+
+function dp_helper_query_alter(QueryAlterableInterface &$query) {
+  //dpm($query);
+    //if($query->alterMetaData['view']->name == 'newsblock') {
+      //if($query->alterMetaData['view']->current_display == 'newsblock_24h') {
+        //dpm($query);
+        //dpm($query->getGroupBy());
+        //unset($query->getGroupBy());
+        //$query->groupBy("nid");
+      //}
+    //}
+  //dpm($query);
+}
+
+//function dp_helper_views_pre_execute(&$view) {
+//  if($view->name == 'newsblock') {
+//    if($view->current_display == 'newsblock_24h') {
+//      dpm($view);
+//    }
+//  }
+//}

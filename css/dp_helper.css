@@ -1,0 +1,15 @@
+#edit-title {
+  outline: none;
+}
+
+#edit-title.title-green {
+  border: 2px solid green;
+}
+
+#edit-title.title-yellow {
+  border: 2px solid yellow;
+}
+
+#edit-title.title-gray {
+  border: 2px solid #424242;
+}
